@@ -1,0 +1,109 @@
+:root {
+  --bg: #f4efe6;
+  --panel: #fffdf8;
+  --ink: #222;
+  --accent: #b5482b;
+  --border: #d6cdbb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+header, .toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: center;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+#title {
+  font-size: 1.4rem;
+  font-family: Georgia, serif;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  background: transparent;
+  flex: 1 1 280px;
+  padding: 4px;
+}
+
+.group { display: flex; align-items: center; gap: 6px; }
+.label { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #777; }
+
+button, select, input[type="number"] {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+input[type="number"] { width: 4.5em; cursor: text; }
+button:hover { border-color: var(--accent); }
+button.active, button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary { background: #2f7d4f; border-color: #2f7d4f; color: #fff; }
+kbd { font-size: 0.7rem; opacity: 0.6; margin-left: 2px; }
+
+main {
+  padding: 20px;
+  overflow-x: auto;
+}
+
+.parts { align-items: stretch; }
+.part {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 2px solid var(--border);
+  border-left: 6px solid var(--part-color);
+  border-radius: 6px;
+}
+.part.active { border-color: var(--part-color); background: #fff; }
+.part-pick { font-weight: bold; color: var(--part-color); }
+.part-pick:hover { border-color: var(--part-color); }
+.parts > button { align-self: center; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#sheet {
+  display: block;
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+#hit { cursor: crosshair; }
+#playhead { stroke: var(--accent); stroke-width: 2; opacity: 0; pointer-events: none; }
+#playhead.on { opacity: 0.8; }
+
+@media print {
+  body { background: #fff; }
+  header .group, .toolbar, footer, #ghost, #playhead { display: none !important; }
+  header { border: 0; justify-content: center; padding: 0 0 10px; }
+  #title { border: 0; text-align: center; width: 100%; }
+  #sheet { max-width: none; border: 0; box-shadow: none; }
+}
+
+footer {
+  text-align: center;
+  padding: 6px 20px 20px;
+  color: #666;
+  font-size: 0.9rem;
+}

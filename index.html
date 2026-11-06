@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Composer – Sheet Music Designer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <input id="title" type="text" value="Untitled Composition" maxlength="80" aria-label="Title">
+    <div class="group">
+      <button id="play" class="primary">▶ Play</button>
+      <button id="stop">■ Stop</button>
+      <label><input id="loop" type="checkbox"> Loop</label>
+      <button id="output" title="Choose which speakers or headphones to play through">🎧 Output</button>
+    </div>
+  </header>
+
+  <section class="toolbar">
+    <div class="group" id="durations" role="radiogroup" aria-label="Note length">
+      <span class="label">Length</span>
+      <button data-dur="4">Whole <kbd>1</kbd></button>
+      <button data-dur="2">Half <kbd>2</kbd></button>
+      <button data-dur="1" class="active">Quarter <kbd>3</kbd></button>
+      <button data-dur="0.5">Eighth <kbd>4</kbd></button>
+      <button data-dur="0.25">16th <kbd>5</kbd></button>
+    </div>
+    <div class="group">
+      <button id="dot" aria-pressed="false" title="Lengthen the note by half">Dotted <kbd>D</kbd></button>
+      <button id="tie" aria-pressed="false" title="Tie to the next note of the same pitch">Tie <kbd>T</kbd></button>
+      <button id="rest" aria-pressed="false">Rest <kbd>R</kbd></button>
+    </div>
+    <div class="group" id="accidentals" role="radiogroup" aria-label="Accidental">
+      <span class="label">Accidental</span>
+      <button data-acc="key" class="active" title="Follow the key signature">Key <kbd>K</kbd></button>
+      <button data-acc="0">♮ <kbd>N</kbd></button>
+      <button data-acc="1">♯ <kbd>S</kbd></button>
+      <button data-acc="-1">♭ <kbd>F</kbd></button>
+    </div>
+    <div class="group" id="articulations" role="radiogroup" aria-label="Articulation">
+      <span class="label">Articulation</span>
+      <button data-art="" class="active">None</button>
+      <button data-art="stac">Staccato <kbd>.</kbd></button>
+      <button data-art="acc">Accent <kbd>A</kbd></button>
+    </div>
+    <div class="group" id="dynamics" role="radiogroup" aria-label="Dynamics">
+      <span class="label">Dynamics</span>
+      <button data-dyn="" class="active" title="Write notes">Off</button>
+      <button data-dyn="pp"><i>pp</i></button>
+      <button data-dyn="p"><i>p</i></button>
+      <button data-dyn="mp"><i>mp</i></button>
+      <button data-dyn="mf"><i>mf</i></button>
+      <button data-dyn="f"><i>f</i></button>
+      <button data-dyn="ff"><i>ff</i></button>
+    </div>
+  </section>
+
+  <section class="toolbar">
+    <div class="group">
+      <label>Tempo <input id="tempo" type="number" min="30" max="240" value="100"> BPM</label>
+    </div>
+    <div class="group">
+      <label>Time
+        <select id="timesig">
+          <option value="3">3/4</option>
+          <option value="4" selected>4/4</option>
+        </select>
+      </label>
+    </div>
+    <div class="group">
+      <label>Key <select id="keysig"></select></label>
+    </div>
+    <div class="group">
+      <span class="label">Measures</span>
+      <button id="measures-minus" aria-label="Remove measure">−</button>
+      <span id="measures-count">8</span>
+      <button id="measures-plus" aria-label="Add measure">+</button>
+    </div>
+    <div class="group">
+      <button id="undo">Undo</button>
+      <button id="autocorrect" title="Fix errors: bars that do not add up, overlaps, notes over barlines, broken ties">✓ AutoCorrect</button>
+      <button id="clear">Clear</button>
+      <button id="save">Save</button>
+      <button id="load">Load</button>
+      <input id="file" type="file" accept="application/json,.json" hidden>
+    </div>
+  </section>
+
+  <section id="parts" class="toolbar parts" aria-label="Parts and instruments"></section>
+
+  <main>
+    <svg id="sheet" xmlns="http://www.w3.org/2000/svg">
+      <g id="score"></g>
+      <g id="ghost"></g>
+      <line id="playhead" y1="0" y2="0" x1="0" x2="0"></line>
+      <rect id="hit" x="0" y="0" fill="transparent"></rect>
+    </svg>
+  </main>
+
+  <footer>
+    <span id="status">Click on the staff to place a note. Click an existing note to remove it.</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
