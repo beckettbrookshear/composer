@@ -439,11 +439,14 @@ const defaultState = () => ({
   bpm: 4,            // beats per measure
   measures: 8,
   key: 'C',
+  repeatStarts: [],  // measure indices with a start-repeat sign at their left barline
+  repeatEnds: [],    // measure indices with an end-repeat sign at their right barline
   parts: [defaultPart(0)]
 });
 
 let state = loadFromStorage() || defaultState();
-let tool = { dur: 1, dot: false, tie: false, rest: false, acc: null, art: '', dyn: '' };
+let tool = { dur: 1, dot: false, tie: false, rest: false, acc: null, art: '', dyn: '', repeat: false, select: false };
+let selection = null; // { anchor, end } measure indices (inclusive) chosen with the Select tool
 let activePart = 0;
 let history = [];
 
@@ -498,7 +501,10 @@ function snapshot() {
   if (history.length > 100) history.shift();
 }
 
+// Saves and redraws. With Auto-fix on, every change is corrected first
+// (bars that add up, no overlaps, notes split at barlines, valid ties).
 function commit() {
+  if (autoFixOn()) state = correctState(state).next;
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) { /* ignore */ }
   render();
 }
@@ -529,11 +535,17 @@ function sanitize(obj) {
     bpm: obj.bpm === 3 ? 3 : 4,
     measures: Math.round(num(obj.measures, 1, 64, d.measures)),
     key: Object.prototype.hasOwnProperty.call(KEYS, obj.key) ? obj.key : d.key,
+    repeatStarts: [],
+    repeatEnds: [],
     parts: []
   };
+  const measureList = (arr) => [...new Set((Array.isArray(arr) ? arr : [])
+    .filter((m) => Number.isInteger(m) && m >= 0 && m < out.measures))].sort((a, b) => a - b);
+  out.repeatStarts = measureList(obj.repeatStarts);
+  out.repeatEnds = measureList(obj.repeatEnds);
   for (const p of src.slice(0, MAX_PARTS)) {
     if (!p || typeof p !== 'object') continue;
-    const known = Object.prototype.hasOwnProperty.call(INSTRUMENTS, p.instrument);
+    const known = Object.prototype.hasOwnProperty.call(INSTRUMENTS, p.instrument) || sf2IsId(p.instrument);
     const part = defaultPart(out.parts.length, known ? p.instrument : 'piano');
     part.muted = !!p.muted;
     part.clef = p.clef === 'bass' ? 'bass' : 'treble';
@@ -571,8 +583,12 @@ function beatToPos(beat, part = 0) {
   const perRow = MPR * state.bpm;
   const row = Math.floor(beat / perRow);
   const inRow = beat - row * perRow;
-  return { x: LEFT + inRow * BEAT_W + PAD, top: staffTop(row, part), row };
+  const shift = repeatShift(Math.floor(beat / state.bpm + 1e-6));
+  return { x: LEFT + inRow * BEAT_W + PAD + shift, top: staffTop(row, part), row };
 }
+
+// Extra room after a start-repeat sign so its dots don't touch the first note
+const repeatShift = (m) => (state.repeatStarts.includes(m) ? 8 : 0);
 
 function stepToY(step, top) {
   return top + 4 * L - step * (L / 2);
@@ -598,14 +614,18 @@ function pointerToCell(evt) {
   }
 
   // Sixteenths snap to quarter-beats, everything else to half-beats
-  const grid = !tool.dyn && tool.dur <= 0.25 ? 0.25 : 0.5;
-  const inRow = Math.round((x - LEFT - PAD) / BEAT_W / grid) * grid;
+  const grid = !tool.dyn && !tool.repeat && !tool.select && tool.dur <= 0.25 ? 0.25 : 0.5;
+  const mUnder = best.row * MPR + Math.floor((x - LEFT) / (state.bpm * BEAT_W));
+  const inRow = Math.round((x - LEFT - PAD - repeatShift(mUnder)) / BEAT_W / grid) * grid;
   const start = best.row * perRow + inRow;
   const step = Math.min(MAX_STEP, Math.max(MIN_STEP, Math.round((best.top + 4 * L - y) / (L / 2))));
 
   if (inRow < 0) return null;
-  const end = start + toolBeats();
   const total = state.measures * state.bpm;
+  if (start >= total) return null;
+  // With Auto-fix on, a too-long note is shortened to fit when placed
+  if (tool.repeat || tool.select || autoFixOn()) return { start, step, part: best.p };
+  const end = start + toolBeats();
   if (end > total) return null;
   // Do not cross barlines (use a tie to sustain across them)
   if (Math.floor(start / state.bpm) !== Math.floor((end - 0.001) / state.bpm)) return null;
@@ -727,6 +747,158 @@ function dynamicSVG(start, p, mark, opacity = 1) {
          `text-anchor="middle" font-family="Georgia,serif" fill="${partColor(p)}" opacity="${opacity}">${mark}</text>`;
 }
 
+// Repeat sign on one staff: 'start' (thick, thin, dots) at the left barline of
+// measure m, 'end' (dots, thin, thick) at its right barline
+function repeatSVG(m, kind, top, opacity = 1) {
+  const bpm = state.bpm;
+  const inRowM = m % MPR;
+  const bx = LEFT + (kind === 'start' ? inRowM : inRowM + 1) * bpm * BEAT_W;
+  const d = kind === 'start' ? 1 : -1;
+  const y1 = top;
+  const y2 = top + 4 * L;
+  const line = (x, w) => `<line x1="${x}" x2="${x}" y1="${y1}" y2="${y2}" stroke="#111" stroke-width="${w}"/>`;
+  const dot = (y) => `<circle cx="${bx + 9 * d}" cy="${y}" r="2.2" fill="#111"/>`;
+  return `<g opacity="${opacity}">` +
+    line(bx + 1.5 * d, 3.5) +
+    line(bx + 5 * d, 1.2) +
+    dot(top + 1.5 * L) + dot(top + 2.5 * L) +
+    '</g>';
+}
+
+// Toggle a repeat sign: clicking the left half of a measure marks a start
+// repeat, the right half an end repeat
+function repeatTarget(cell) {
+  const m = Math.floor(cell.start / state.bpm + 1e-6);
+  const kind = cell.start - m * state.bpm < state.bpm / 2 ? 'start' : 'end';
+  return { m, kind };
+}
+
+function toggleRepeat(cell) {
+  const { m, kind } = repeatTarget(cell);
+  const key = kind === 'start' ? 'repeatStarts' : 'repeatEnds';
+  snapshot();
+  const list = state[key];
+  state[key] = list.includes(m) ? list.filter((x) => x !== m) : [...list, m].sort((a, b) => a - b);
+  commit();
+  const added = state[key].includes(m);
+  status.textContent = `${added ? 'Added' : 'Removed'} ${kind} repeat ${kind === 'start' ? 'at the start' : 'at the end'} of measure ${m + 1}.`;
+}
+
+// The order measures are played in, following repeat signs. An end repeat
+// jumps back once to the latest start repeat (or the beginning / the last
+// finished repeat).
+function playOrder() {
+  const order = [];
+  const done = new Set();
+  let back = 0;
+  let m = 0;
+  while (m < state.measures && order.length < 2000) {
+    if (state.repeatStarts.includes(m)) back = m;
+    order.push(m);
+    if (state.repeatEnds.includes(m)) {
+      if (!done.has(m)) { done.add(m); m = back; continue; }
+      back = m + 1;
+    }
+    m++;
+  }
+  return order;
+}
+
+// ---------- Measure selection ----------
+function selRange() {
+  if (!selection) return null;
+  return { from: Math.min(selection.anchor, selection.end), to: Math.max(selection.anchor, selection.end) };
+}
+
+function describeSel(s) {
+  return s.from === s.to ? `measure ${s.from + 1}` : `measures ${s.from + 1}–${s.to + 1}`;
+}
+
+function updateSelectionButtons() {
+  const s = selRange();
+  $('sel-dup').disabled = !s;
+  $('sel-del').disabled = !s;
+}
+
+// Click a measure to select it; Shift-click another to select everything between
+function selectAt(cell, extend) {
+  const m = Math.floor(cell.start / state.bpm + 1e-6);
+  if (extend && selection) selection.end = m;
+  else if (selection && selection.anchor === m && selection.end === m) selection = null;
+  else selection = { anchor: m, end: m };
+  render();
+  const s = selRange();
+  status.textContent = s
+    ? `Selected ${describeSel(s)}. Shift-click to select more, then Duplicate or Delete.`
+    : 'Selection cleared.';
+}
+
+// Move every measure-based thing in the score: map(m) gives the new measure
+// index for old measure m, or null to drop it. `copies` adds shifted copies of ranges.
+function remapMeasures(map, copies = []) {
+  const bpm = state.bpm;
+  const moveList = (items) => {
+    const out = [];
+    for (const it of items) {
+      const m = Math.floor(it.start / bpm + 1e-6);
+      const nm = map(m);
+      if (nm != null) out.push({ ...it, start: it.start + (nm - m) * bpm });
+      for (const c of copies) {
+        if (m >= c.from && m <= c.to) out.push({ ...it, start: it.start + c.shift * bpm });
+      }
+    }
+    return out;
+  };
+  for (const part of state.parts) {
+    part.events = moveList(part.events);
+    part.dynamics = moveList(part.dynamics);
+  }
+  const moveMeasures = (list) => {
+    const out = new Set();
+    for (const m of list) {
+      const nm = map(m);
+      if (nm != null) out.add(nm);
+      for (const c of copies) if (m >= c.from && m <= c.to) out.add(m + c.shift);
+    }
+    return [...out].sort((a, b) => a - b);
+  };
+  state.repeatStarts = moveMeasures(state.repeatStarts);
+  state.repeatEnds = moveMeasures(state.repeatEnds);
+}
+
+function deleteSelection() {
+  const s = selRange();
+  if (!s) return;
+  const n = s.to - s.from + 1;
+  if (n >= state.measures) {
+    status.textContent = 'You can’t delete every measure. Use Clear to remove all the notes instead.';
+    return;
+  }
+  snapshot();
+  remapMeasures((m) => (m < s.from ? m : m > s.to ? m - n : null));
+  state.measures -= n;
+  selection = null;
+  commit();
+  status.textContent = `Deleted ${describeSel(s)}. Undo to bring ${n > 1 ? 'them' : 'it'} back.`;
+}
+
+// Insert a copy of the selected measures right after them
+function duplicateSelection() {
+  const s = selRange();
+  if (!s) return;
+  const n = s.to - s.from + 1;
+  if (state.measures + n > 64) {
+    status.textContent = `Not enough room: a piece can have at most 64 measures (this would make ${state.measures + n}).`;
+    return;
+  }
+  snapshot();
+  remapMeasures((m) => (m > s.to ? m + n : m), [{ from: s.from, to: s.to, shift: n }]);
+  state.measures += n;
+  selection = { anchor: s.to + 1, end: s.to + n }; // select the new copy
+  commit();
+  status.textContent = `Duplicated ${describeSel(s)}. The copy is now selected.`;
+}
+
 function render() {
   if (activePart >= state.parts.length) activePart = state.parts.length - 1;
   const bpm = state.bpm;
@@ -737,11 +909,29 @@ function render() {
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   hit.setAttribute('width', W);
   hit.setAttribute('height', H);
+  applyZoom();
+
+  if (selection && Math.max(selection.anchor, selection.end) >= state.measures) selection = null;
+  updateSelectionButtons();
+  const sel = selRange();
 
   let out = '';
   for (let r = 0; r < rows; r++) {
     const inRow = Math.min(MPR, state.measures - r * MPR);
     const w = inRow * bpm * BEAT_W;
+
+    // Highlight selected measures across all parts of this row
+    if (sel) {
+      const a = Math.max(sel.from, r * MPR);
+      const b = Math.min(sel.to, r * MPR + inRow - 1);
+      if (a <= b) {
+        const x = LEFT + (a - r * MPR) * bpm * BEAT_W;
+        const y = staffTop(r, 0) - 22;
+        const h = staffTop(r, nParts - 1) + 4 * L + 22 - y;
+        out += `<rect x="${x}" y="${y}" width="${(b - a + 1) * bpm * BEAT_W}" height="${h}" rx="4" ` +
+               `fill="#2b6cb5" fill-opacity="0.12" stroke="#2b6cb5" stroke-width="1.5"/>`;
+      }
+    }
 
     if (nParts > 1) {
       // Line joining the staves of this system
@@ -756,7 +946,7 @@ function render() {
         out += `<rect x="0" y="${top - 26}" width="${W}" height="${4 * L + 52}" fill="${color}" opacity="0.07"/>`;
       }
       if (nParts > 1) {
-        const label = INSTRUMENTS[state.parts[p].instrument].label.slice(0, 13);
+        const label = instrumentLabel(state.parts[p].instrument).slice(0, 13);
         out += `<text x="14" y="${top - 10}" font-size="11" font-weight="bold" fill="${color}">${label}</text>`;
       }
 
@@ -771,6 +961,12 @@ function render() {
         if (p === 0 && k < inRow) {
           out += `<text x="${bx + 3}" y="${top - 8}" font-size="10" fill="#999">${r * MPR + k + 1}</text>`;
         }
+      }
+      for (const m of state.repeatStarts) {
+        if (m >= r * MPR && m < r * MPR + inRow) out += repeatSVG(m, 'start', top);
+      }
+      for (const m of state.repeatEnds) {
+        if (m >= r * MPR && m < r * MPR + inRow) out += repeatSVG(m, 'end', top);
       }
       // Left edge line + clef
       out += `<line x1="${LEFT}" x2="${LEFT}" y1="${top}" y2="${top + 4 * L}" stroke="#111" stroke-width="1.2"/>`;
@@ -857,6 +1053,25 @@ function renderParts() {
       }
       sel.appendChild(group);
     }
+    // Instruments from loaded SoundFont (.sf2) files
+    for (const font of SF2_FONTS.values()) {
+      const group = document.createElement('optgroup');
+      group.label = `🎹 ${font.name}`;
+      for (const p of font.presets) {
+        const opt = document.createElement('option');
+        opt.value = sf2PresetId(font, p);
+        opt.textContent = p.name;
+        group.appendChild(opt);
+      }
+      sel.appendChild(group);
+    }
+    if (sf2IsId(part.instrument) && sf2Lookup(part.instrument).missing) {
+      const opt = document.createElement('option');
+      opt.value = part.instrument;
+      opt.textContent = '⚠ Missing instrument (plays as piano)';
+      sel.prepend(opt);
+      sel.title = 'This part uses a SoundFont file that is not loaded on this computer. Load it with “🎹 Instruments…”.';
+    }
     sel.value = part.instrument;
     sel.addEventListener('change', () => {
       snapshot();
@@ -891,7 +1106,67 @@ function renderParts() {
 
     row.append(pick, sel, clefSel, muteLabel);
 
+    // Copy this part (instrument, clef, notes, dynamics) into a new part right below it
+    const dup = document.createElement('button');
+    dup.textContent = 'Duplicate';
+    dup.title = state.parts.length >= MAX_PARTS ? `At most ${MAX_PARTS} parts` : `Make a copy of Part ${i + 1}`;
+    dup.disabled = state.parts.length >= MAX_PARTS;
+    dup.addEventListener('click', () => {
+      snapshot();
+      state.parts.splice(i + 1, 0, JSON.parse(JSON.stringify(part)));
+      activePart = i + 1;
+      commit();
+      status.textContent = `Part ${i + 1} duplicated as Part ${i + 2}.`;
+    });
+    row.append(dup);
+
     if (state.parts.length > 1) {
+      // Move this whole part (instrument + notes) up or down in the score
+      for (const [dir, arrow, word] of [[-1, '↑', 'up'], [1, '↓', 'down']]) {
+        const j = i + dir;
+        const mv = document.createElement('button');
+        mv.textContent = arrow;
+        mv.title = `Move Part ${i + 1} ${word}`;
+        mv.setAttribute('aria-label', mv.title);
+        mv.disabled = j < 0 || j >= state.parts.length;
+        mv.addEventListener('click', () => {
+          snapshot();
+          [state.parts[i], state.parts[j]] = [state.parts[j], state.parts[i]];
+          activePart = j;
+          commit();
+          status.textContent = `Part ${i + 1} moved ${word}.`;
+        });
+        row.append(mv);
+      }
+
+      // Swap instruments with another part: the notes stay, the instruments trade places
+      const swap = document.createElement('select');
+      swap.setAttribute('aria-label', `Swap Part ${i + 1} instrument with another part`);
+      swap.title = 'Trade instruments with another part (the notes stay where they are)';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '⇄ Swap instrument…';
+      swap.appendChild(placeholder);
+      state.parts.forEach((other, j) => {
+        if (j === i) return;
+        const opt = document.createElement('option');
+        opt.value = j;
+        opt.textContent = `with Part ${j + 1} (${INSTRUMENTS[other.instrument]?.label || other.instrument})`;
+        swap.appendChild(opt);
+      });
+      swap.addEventListener('change', () => {
+        if (swap.value === '') return;
+        const j = Number(swap.value);
+        const other = state.parts[j];
+        snapshot();
+        [part.instrument, other.instrument] = [other.instrument, part.instrument];
+        activePart = i;
+        commit();
+        status.textContent = `Part ${i + 1} and Part ${j + 1} switched instruments.`;
+      });
+      row.append(swap);
+
+
       const del = document.createElement('button');
       del.textContent = 'Remove';
       del.addEventListener('click', () => {
@@ -916,7 +1191,82 @@ function renderParts() {
     commit();
   });
   panel.append(add);
+
+  const plug = document.createElement('button');
+  plug.textContent = '🎹 Instruments…';
+  plug.title = 'Add instrument sounds from SoundFont (.sf2) files';
+  plug.addEventListener('click', openInstrumentsDialog);
+  panel.append(plug);
 }
+
+function instrumentLabel(id) {
+  return INSTRUMENTS[id] ? INSTRUMENTS[id].label : sf2Label(id) || 'Instrument';
+}
+
+// ---------- Instrument plug-ins (SoundFont files) ----------
+function renderFontList() {
+  const list = $('sf-list');
+  list.innerHTML = '';
+  if (!SF2_FONTS.size) {
+    list.innerHTML = '<li class="sf-empty">No instrument files added yet.</li>';
+    return;
+  }
+  for (const font of SF2_FONTS.values()) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.innerHTML = `<b></b> <small>${font.presets.length} instrument${font.presets.length > 1 ? 's' : ''}</small>`;
+    name.querySelector('b').textContent = font.name;
+    const rm = document.createElement('button');
+    rm.textContent = 'Remove';
+    rm.addEventListener('click', async () => {
+      if (!confirm(`Remove “${font.name}”? Parts using it will play as piano until you add it again.`)) return;
+      await sf2Remove(font.id);
+      renderFontList();
+      render();
+    });
+    li.append(name, rm);
+    list.append(li);
+  }
+}
+
+function openInstrumentsDialog() {
+  renderFontList();
+  $('sf-msg').textContent = '';
+  $('sf-dialog').showModal();
+}
+
+$('sf-close').addEventListener('click', () => $('sf-dialog').close());
+$('sf-add').addEventListener('click', () => $('sf-file').click());
+$('sf-file').addEventListener('change', async (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  const msgs = [];
+  let first = null;
+  for (const file of files) {
+    $('sf-msg').textContent = `Loading ${file.name}…`;
+    try {
+      const { font, saved } = await sf2AddFile(file);
+      first = first || font;
+      msgs.push(`Added “${font.name}” with ${font.presets.length} instrument${font.presets.length > 1 ? 's' : ''}.` +
+        (saved ? '' : ' (It could not be saved in the browser, so you’ll need to add it again next time.)'));
+    } catch (err) {
+      msgs.push(`${file.name}: ${err.message || 'could not be read.'}`);
+    }
+  }
+  $('sf-msg').textContent = msgs.join(' ');
+  renderFontList();
+  if (first) {
+    // Use the new sound on the part you're working on, so you can hear it right away
+    snapshot();
+    const part = state.parts[activePart];
+    part.instrument = sf2PresetId(first, first.presets[0]);
+    commit();
+    previewNote(64, part.instrument);
+    status.textContent = `Part ${activePart + 1} now uses “${first.presets[0].name}”. Pick other sounds from the Instrument menu under 🎹 ${first.name}.`;
+  } else {
+    render();
+  }
+});
 
 // ---------- Editing ----------
 function placeAt(cell) {
@@ -931,6 +1281,23 @@ function placeAt(cell) {
     return;
   }
 
+  // With Auto-fix on, a new note/rest may not spill over the barline or into
+  // the next note: shorten it to the longest note value that fits.
+  let dur = tool.dur;
+  let dot = tool.dot;
+  let shortened = false;
+  if (autoFixOn()) {
+    const barEnd = (Math.floor(cell.start / state.bpm + 1e-6) + 1) * state.bpm;
+    let room = barEnd - cell.start;
+    for (const e of part.events) {
+      if (!e.rest && e.start > cell.start + 1e-6) room = Math.min(room, e.start - cell.start);
+    }
+    if (dur * (dot ? 1.5 : 1) > room + 1e-6) {
+      const fit = splitLength(room)[0];
+      if (fit) { dur = fit.dur; dot = fit.dot; shortened = true; }
+    }
+  }
+
   const evs = part.events;
   const sameStart = evs.filter((e) => e.start === cell.start);
 
@@ -938,21 +1305,22 @@ function placeAt(cell) {
     const existing = sameStart.find((e) => e.rest);
     part.events = evs.filter((e) => e.start !== cell.start);
     if (!existing) {
-      part.events.push({ start: cell.start, dur: tool.dur, dot: tool.dot, step: 0, acc: null, rest: true, tie: false, art: '' });
-    }
+      part.events.push({ start: cell.start, dur, dot, step: 0, acc: null, rest: true, tie: false, art: '' });
+    } else shortened = false;
   } else {
     const existing = sameStart.find((e) => !e.rest && e.step === cell.step);
     part.events = evs.filter((e) => !(e.start === cell.start && (e.rest || e === existing)));
     if (!existing) {
       part.events.push({
-        start: cell.start, dur: tool.dur, dot: tool.dot, step: cell.step,
+        start: cell.start, dur, dot, step: cell.step,
         acc: tool.acc, rest: false, tie: tool.tie, art: tool.art
       });
       const acc = resolveAcc(tool.acc, cell.step, part.clef);
       previewNote(stepToMidi(cell.step, acc, part.clef), part.instrument);
-    }
+    } else shortened = false;
   }
   commit();
+  if (shortened) status.textContent = 'Auto-fix: that note was too long for the space left in the bar, so it was shortened to fit.';
 }
 
 function trimEvents() {
@@ -961,6 +1329,8 @@ function trimEvents() {
     part.events = part.events.filter((e) => e.start + beats(e) <= total);
     part.dynamics = part.dynamics.filter((d) => d.start < total);
   }
+  state.repeatStarts = state.repeatStarts.filter((m) => m < state.measures);
+  state.repeatEnds = state.repeatEnds.filter((m) => m < state.measures);
 }
 
 function setMeasures(n) {
@@ -976,13 +1346,35 @@ hit.addEventListener('click', (e) => {
   const cell = pointerToCell(e);
   if (!cell) return;
   activePart = cell.part;
-  placeAt(cell);
+  if (tool.select) selectAt(cell, e.shiftKey);
+  else if (tool.repeat) toggleRepeat(cell);
+  else placeAt(cell);
 });
 
 hit.addEventListener('mousemove', (e) => {
   const cell = pointerToCell(e);
   if (!cell) {
     ghostG.innerHTML = '';
+    return;
+  }
+  if (tool.select) {
+    const m = Math.floor(cell.start / state.bpm + 1e-6);
+    const row = Math.floor(m / MPR);
+    const x = LEFT + (m % MPR) * state.bpm * BEAT_W;
+    const y = staffTop(row, 0) - 22;
+    const h = staffTop(row, state.parts.length - 1) + 4 * L + 22 - y;
+    ghostG.innerHTML = `<rect x="${x}" y="${y}" width="${state.bpm * BEAT_W}" height="${h}" rx="4" fill="#2b6cb5" opacity="0.08"/>`;
+    status.textContent = selection
+      ? `Measure ${m + 1}: click to select it, Shift-click to select up to here.`
+      : `Measure ${m + 1}: click to select it.`;
+    return;
+  }
+  if (tool.repeat) {
+    const { m, kind } = repeatTarget(cell);
+    const row = Math.floor(m / MPR);
+    ghostG.innerHTML = state.parts.map((_, p) => repeatSVG(m, kind, staffTop(row, p), 0.35)).join('');
+    const has = state[kind === 'start' ? 'repeatStarts' : 'repeatEnds'].includes(m);
+    status.textContent = `Click to ${has ? 'remove the' : 'add a'} ${kind} repeat ${kind === 'start' ? 'at the start' : 'at the end'} of measure ${m + 1}.`;
     return;
   }
   const clef = state.parts[cell.part].clef;
@@ -1021,6 +1413,8 @@ function setDuration(v) {
   tool.dur = v;
   setRadio('durations', 'dur', v);
   setDynamic('');
+  setRepeatTool(false);
+  setSelectTool(false);
 }
 function setAccidental(v) {
   tool.acc = v;
@@ -1033,7 +1427,32 @@ function setArticulation(v) {
 function setDynamic(v) {
   tool.dyn = v;
   setRadio('dynamics', 'dyn', v);
+  if (v) { setRepeatTool(false); setSelectTool(false); }
 }
+// Repeat mode: clicks on the staff add/remove repeat signs instead of notes
+function setRepeatTool(on) {
+  tool.repeat = on;
+  $('repeat-tool').setAttribute('aria-pressed', String(on));
+  if (on) { if (tool.dyn) setDynamic(''); setSelectTool(false); }
+}
+$('repeat-tool').addEventListener('click', () => setRepeatTool(!tool.repeat));
+
+// Select mode: clicks on the staff select measures instead of placing notes
+function setSelectTool(on) {
+  tool.select = on;
+  $('select-tool').setAttribute('aria-pressed', String(on));
+  if (on) {
+    if (tool.dyn) setDynamic('');
+    setRepeatTool(false);
+    status.textContent = 'Select mode: click a measure, Shift-click another to select a range.';
+  } else if (selection) {
+    selection = null;
+    render();
+  }
+}
+$('select-tool').addEventListener('click', () => setSelectTool(!tool.select));
+$('sel-dup').addEventListener('click', duplicateSelection);
+$('sel-del').addEventListener('click', deleteSelection);
 function toggleFlag(name) {
   tool[name] = !tool[name];
   $(name).setAttribute('aria-pressed', String(tool[name]));
@@ -1113,9 +1532,16 @@ function fitPieces(ev, start, len, lastTie) {
   });
 }
 
-function autoCorrect() {
+const AUTOFIX_KEY = 'composer-autofix';
+function autoFixOn() {
+  const box = document.getElementById('autofix');
+  return !box || box.checked;
+}
+
+// Returns a corrected copy of `src` plus counts of what was fixed
+function correctState(src) {
   const EPS = 1e-6;
-  const next = JSON.parse(JSON.stringify(state));
+  const next = JSON.parse(JSON.stringify(src));
   const fx = { rests: 0, split: 0, removed: 0, ties: 0 };
   const bpm = next.bpm;
   const total = next.measures * bpm;
@@ -1147,6 +1573,13 @@ function autoCorrect() {
       const hi = lo + bpm;
       const inM = flat.filter((e) => e.start >= lo - EPS && e.start < hi - EPS);
       if (!inM.length) continue;
+      // A bar of nothing but rests becomes one full-bar rest
+      if (inM.every((e) => e.rest)) {
+        const whole = fitPieces(blank, lo, bpm, false);
+        if (inM.length !== whole.length || inM.some((e, k) => e.start !== whole[k].start || beats(e) !== beats(whole[k]))) fx.rests++;
+        out.push(...whole);
+        continue;
+      }
       const starts = [...new Set(inM.map((e) => e.start))].sort((a, b) => a - b);
       let cursor = lo;
       starts.forEach((s, i) => {
@@ -1199,7 +1632,11 @@ function autoCorrect() {
     }
     part.dynamics = [...dyn.values()];
   }
+  return { next, fx };
+}
 
+function autoCorrect() {
+  const { next, fx } = correctState(state);
   if (JSON.stringify(next) === JSON.stringify(state)) {
     status.textContent = 'AutoCorrect: no errors found.';
     return;
@@ -1215,6 +1652,18 @@ function autoCorrect() {
   status.textContent = `AutoCorrect: ${parts.join(', ') || 'tidied'}. Undo to revert.`;
 }
 $('autocorrect').addEventListener('click', autoCorrect);
+
+try { if (localStorage.getItem(AUTOFIX_KEY) === 'off') $('autofix').checked = false; } catch (_) { /* ignore */ }
+$('autofix').addEventListener('change', (e) => {
+  try { localStorage.setItem(AUTOFIX_KEY, e.target.checked ? 'on' : 'off'); } catch (_) { /* ignore */ }
+  if (e.target.checked) {
+    snapshot();
+    commit();
+    status.textContent = 'Auto-fix is on: every bar will always add up correctly. Undo to revert.';
+  } else {
+    status.textContent = 'Auto-fix is off. Use ✓ AutoCorrect to fix errors yourself.';
+  }
+});
 
 $('clear').addEventListener('click', () => {
   if (state.parts.every((p) => !p.events.length)) return;
@@ -1259,6 +1708,20 @@ document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     undo();
+    return;
+  }
+  if (selection && (e.key === 'Delete' || e.key === 'Backspace')) {
+    e.preventDefault();
+    deleteSelection();
+    return;
+  }
+  if (selection && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
+    e.preventDefault();
+    duplicateSelection();
+    return;
+  }
+  if (selection && e.key === 'Escape') {
+    setSelectTool(false);
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1426,6 +1889,10 @@ async function prepareSamples(jobs) {
 }
 
 function voice(midi, when, dur, out, instrumentId, vel = 1) {
+  if (sf2IsId(instrumentId)) {
+    if (sf2Voice(instrumentId, midi, when, dur, out, vel)) return;
+    instrumentId = 'piano'; // SoundFont not loaded here: fall back to piano
+  }
   const inst = INSTRUMENTS[instrumentId] || INSTRUMENTS.piano;
   const sm = SAMPLED[instrumentId];
   if (sm) {
@@ -1543,13 +2010,20 @@ async function play() {
   master.gain.value = 1 / Math.sqrt(state.parts.length); // headroom for several parts
   master.connect(ctx.destination);
 
+  // Play the measures in repeat order: measure order[k] sounds at k bars in
+  const bpm = state.bpm;
+  const order = playOrder();
   for (const { part, notes } of plans) {
-    for (const n of notes) {
-      voice(n.midi, t0 + n.start * spb, n.len * spb * n.gate, master, part.instrument, n.vel);
-    }
+    order.forEach((m, k) => {
+      for (const n of notes) {
+        if (Math.floor(n.start / bpm + 1e-6) !== m) continue;
+        const at = k * bpm + (n.start - m * bpm);
+        voice(n.midi, t0 + at * spb, n.len * spb * n.gate, master, part.instrument, n.vel);
+      }
+    });
   }
 
-  playing = { t0, spb, total: state.measures * state.bpm };
+  playing = { t0, spb, order, total: order.length * bpm };
   playhead.classList.add('on');
   playToken++;
   requestAnimationFrame(tick);
@@ -1575,7 +2049,10 @@ function tick() {
     return;
   }
   if (beat >= 0) {
-    const pos = beatToPos(beat);
+    // Map the time played so far back to its place on the page (repeats jump back)
+    const k = Math.floor(beat / state.bpm);
+    const scoreBeat = (playing.order[k] ?? k) * state.bpm + (beat - k * state.bpm);
+    const pos = beatToPos(scoreBeat);
     const x = pos.x - PAD / 2;
     playhead.setAttribute('x1', x);
     playhead.setAttribute('x2', x);
@@ -1609,4 +2086,46 @@ for (const [id, k] of Object.entries(KEYS)) {
   opt.textContent = k.label;
   $('keysig').appendChild(opt);
 }
+
+// ---------- Zoom ----------
+// 100% = the sheet is 1000px wide. "Fit" shrinks/grows it so the whole score
+// fits in the space under the toolbars, so you never have to scroll the page.
+const ZOOM_BASE = 1000;
+
+function applyZoom() {
+  const slider = document.getElementById('zoom');
+  const fitBtn = document.getElementById('fit');
+  const main = document.querySelector('main');
+  if (!slider || !fitBtn || !main) return;
+  let pct = Number(slider.value);
+  if (fitBtn.getAttribute('aria-pressed') === 'true') {
+    const vb = svg.viewBox.baseVal;
+    const cs = getComputedStyle(main);
+    const availW = main.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2;
+    const availH = main.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 2;
+    if (vb && vb.width && vb.height && availW > 0 && availH > 0) {
+      const width = Math.min(availW, (availH * vb.width) / vb.height);
+      pct = Math.max(10, Math.round((width / ZOOM_BASE) * 100));
+      slider.value = pct;
+    }
+  }
+  svg.style.width = `${(ZOOM_BASE * pct) / 100}px`;
+  document.getElementById('zoom-value').textContent = `${pct}%`;
+}
+
+$('zoom').addEventListener('input', () => {
+  $('fit').setAttribute('aria-pressed', 'false');
+  applyZoom();
+});
+$('fit').addEventListener('click', () => {
+  const on = $('fit').getAttribute('aria-pressed') !== 'true';
+  $('fit').setAttribute('aria-pressed', String(on));
+  applyZoom();
+});
+// Re-fit when the window or toolbars change size
+new ResizeObserver(() => applyZoom()).observe(document.querySelector('main'));
+
+if (autoFixOn()) state = correctState(state).next;
 render();
+// Bring back instrument files added on earlier visits, then refresh the menus
+sf2LoadSaved().then(() => { if (SF2_FONTS.size) render(); });

@@ -15,6 +15,12 @@
       <label><input id="loop" type="checkbox"> Loop</label>
       <button id="output" title="Choose which speakers or headphones to play through">🎧 Output</button>
     </div>
+    <div class="group" id="zoom-group">
+      <span class="label">Zoom</span>
+      <input id="zoom" type="range" min="30" max="200" step="5" value="100" aria-label="Zoom">
+      <span id="zoom-value">100%</span>
+      <button id="fit" aria-pressed="true" title="Shrink the whole score to fit the window">Fit</button>
+    </div>
   </header>
 
   <section class="toolbar">
@@ -58,6 +64,14 @@
 
   <section class="toolbar">
     <div class="group">
+      <button id="select-tool" aria-pressed="false" title="Select measures: click one, Shift-click to select a range">⬚ Select</button>
+      <button id="sel-dup" disabled title="Copy the selected measures right after them (⌘D)">Duplicate</button>
+      <button id="sel-del" disabled title="Delete the selected measures (Delete key)">Delete</button>
+    </div>
+    <div class="group">
+      <button id="repeat-tool" aria-pressed="false" title="Click the left half of a measure for a start repeat, the right half for an end repeat">𝄆 Repeat 𝄇</button>
+    </div>
+    <div class="group">
       <label>Tempo <input id="tempo" type="number" min="30" max="240" value="100"> BPM</label>
     </div>
     <div class="group">
@@ -79,6 +93,7 @@
     </div>
     <div class="group">
       <button id="undo">Undo</button>
+      <label title="Automatically fix errors after every change"><input id="autofix" type="checkbox" checked> Auto-fix</label>
       <button id="autocorrect" title="Fix errors: bars that do not add up, overlaps, notes over barlines, broken ties">✓ AutoCorrect</button>
       <button id="clear">Clear</button>
       <button id="save">Save</button>
@@ -102,6 +117,23 @@
     <span id="status">Click on the staff to place a note. Click an existing note to remove it.</span>
   </footer>
 
+  <dialog id="sf-dialog" aria-labelledby="sf-title">
+    <h2 id="sf-title">🎹 Instrument plug-ins</h2>
+    <p>Add instrument sounds from <b>SoundFont (.sf2)</b> files, which you can download for free online
+      (search for “free sf2 soundfont”, e.g. on musical-artifacts.com).
+      Each instrument in the file appears in the parts’ Instrument menu.</p>
+    <p class="sf-note">VST and AU plug-ins only work inside desktop music programs, not in a web page,
+      but many of them also come in an .sf2 version.</p>
+    <ul id="sf-list"></ul>
+    <p id="sf-msg" role="status"></p>
+    <div class="sf-actions">
+      <button id="sf-add" class="primary">+ Add .sf2 file</button>
+      <button id="sf-close">Done</button>
+    </div>
+    <input id="sf-file" type="file" accept=".sf2" multiple hidden>
+  </dialog>
+
+  <script src="sf2.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
